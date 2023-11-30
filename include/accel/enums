@@ -1,0 +1,210 @@
+#ifndef ACCEL_ENUMS_HEADER
+#define ACCEL_ENUMS_HEADER
+
+#include <cstddef>
+
+#include <accel/macros>
+#include <accel/compat>
+
+namespace accel
+{
+    namespace enums
+    {
+        namespace details
+        {
+            // ----------------------------------------------
+            // C++11 constexpr helper functions
+            // ----------------------------------------------
+
+            struct const_string_span
+            {
+                const char* string;
+                std::size_t start;
+                std::size_t end;
+            };
+
+            constexpr std::size_t find_nth(const char* str, char c, std::size_t n)
+            {
+                return (*str == '\0') ? static_cast<std::size_t>(-1) : ((*str == c && n == 1) ? 0 : (find_nth(str + 1, c, (*str == c) ? n - 1 : n) + 1));
+            }
+
+            constexpr const_string_span get_qualified_value_token_span(const char* signature)
+            {
+                return { signature, find_nth(signature, '=', 2) + 2, find_nth(signature, ']', 1) };
+            }
+
+            constexpr const_string_span get_value_token_span(const const_string_span& qualified_span)
+            {
+                return { qualified_span.string, find_nth(qualified_span.string + qualified_span.start, ':', 2) + qualified_span.start + 1, qualified_span.end };
+            }
+
+            constexpr const_string_span get_final_name_span(const char* signature)
+            {
+                return get_value_token_span(get_qualified_value_token_span(signature));
+            }
+
+            constexpr bool is_valid_value_span(const const_string_span& span)
+            {
+                return span.string[span.start] != '(' && !(span.string[span.start] >= '0' && span.string[span.start] <= '9');
+            }
+
+            // ----------------------------------------------
+            // Enum value reflection functions
+            // ----------------------------------------------
+
+            template<typename EnumT, EnumT Enum>
+            constexpr const char* get_enum_signature()
+            {
+                return __PRETTY_FUNCTION__;
+            }
+
+            template<typename EnumT, EnumT Enum>
+            constexpr bool is_enum_value_valid()
+            {
+                return is_valid_value_span(get_qualified_value_token_span(get_enum_signature<EnumT, Enum>()));
+            }
+
+            // Enum value traits
+            template<typename EnumT, EnumT Enum>
+            struct enum_value_traits
+            {
+                static constexpr bool is_valid = is_enum_value_valid<EnumT, Enum>();
+                static constexpr const char* signature = get_enum_signature<EnumT, Enum>();
+                static constexpr const_string_span span = get_final_name_span(signature);
+            };
+
+
+
+            // ----------------------------------------------
+            // Enum reflection functions
+            // ----------------------------------------------
+
+            template<typename EnumT, std::size_t Index, bool Valid> 
+            struct get_enum_size_impl;
+
+            template <typename EnumT, std::size_t Index>
+            struct get_enum_size_impl<EnumT, Index, true>
+            {
+                static constexpr std::size_t value = get_enum_size_impl<EnumT, Index + 1, enum_value_traits<EnumT, static_cast<EnumT>(Index)>::is_valid>::value;
+            };
+
+            template <typename EnumT, std::size_t Index>
+            struct get_enum_size_impl<EnumT, Index, false>
+            {
+                static constexpr std::size_t value = Index - 1;
+            };
+
+            template <typename EnumT>
+            constexpr std::size_t get_enum_size()
+            {
+                return get_enum_size_impl<EnumT, 0, true>::value;
+            }
+
+            // Enum traits
+            template<typename EnumT>
+            struct enum_traits
+            {
+                static constexpr std::size_t size = get_enum_size<EnumT>();
+            };
+
+
+
+            // ----------------------------------------------
+            // Mapping functions
+            // ----------------------------------------------
+
+            template<typename EnumT>
+            struct span_array
+            {
+                using traits = enum_traits<EnumT>;
+
+                const_string_span data[traits::size];
+
+                template<typename... SpanTs>
+                constexpr span_array(SpanTs... spans) : data{ std::move(spans)...  } {}
+            };
+
+            template<typename EnumT, std::size_t ...Indices>
+            constexpr span_array<EnumT> make_span_array_impl(index_sequence<Indices...>)
+            {
+                return span_array<EnumT>(get_final_name_span(enum_value_traits<EnumT, static_cast<EnumT>(Indices)>::signature)...);
+            }
+
+            template<typename EnumT>
+            constexpr span_array<EnumT> make_span_array()
+            {
+                return make_span_array_impl<EnumT>(make_index_sequence<enum_traits<EnumT>::size>());
+            }
+
+            template<typename EnumT>
+            struct mapper
+            {
+                static constexpr span_array<EnumT> array = make_span_array<EnumT>();
+
+                static constexpr const_string_span get_name(EnumT value)
+                {
+                    return array.data[static_cast<std::size_t>(value)];
+                }
+
+                static EnumT get_value(const std::string& name)
+                {
+                    std::size_t element = 0;
+                    for (; element < enum_traits<EnumT>::size; element++)
+                    {
+                        const auto& span = array.data[element];
+                        std::size_t length1 = span.end - span.start;
+                        std::size_t length2 = name.length();
+                        if (length1 != length2)
+                            continue;
+
+                        const char* string1 = span.string + span.start;
+                        const char* string2 = name.data();
+                        bool match = true;
+                        std::size_t index = 0;
+                        for (; index < length1; index++)
+                        {
+                            if (string1[index] != string2[index])
+                            {
+                                match = false;
+                                break;
+                            }
+                        }
+
+                        if (match)
+                            return static_cast<EnumT>(element);
+                    }
+
+                    throw std::runtime_error("Failed to get enum value from name");
+                }
+            };
+            
+            template<typename EnumT>
+            constexpr span_array<EnumT> mapper<EnumT>::array;
+        }
+
+
+        template<typename EnumT>
+        static constexpr std::size_t get_size()
+        {
+            return details::get_enum_size<EnumT>();
+        }
+
+        template<typename EnumT>
+        static inline std::string get_name(EnumT value)
+        {
+            if (static_cast<std::size_t>(value) >= details::enum_traits<EnumT>::size)
+                throw std::runtime_error("Failed to get name of enum value.");
+
+            auto span = details::mapper<EnumT>::get_name(value); 
+            return std::string(span.string + span.start, span.string + span.end);
+        }
+
+        template<typename EnumT>
+        static constexpr EnumT get_value(const std::string& name)
+        {
+            return details::mapper<EnumT>::get_value(name);
+        }
+    }
+}
+
+#endif
